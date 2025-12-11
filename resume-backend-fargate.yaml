@@ -1,0 +1,265 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: One-click ECS Fargate deployment for Resume Builder FastAPI backend.
+
+Parameters:
+  ECRImageUrl:
+    Type: String
+    Description: "Full ECR image URL (e.g. 600627329004.dkr.ecr.us-east-1.amazonaws.com/resume-builder:latest)"
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC where ECS tasks and ALB will run"
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Public subnet 1 for ALB and ECS tasks"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Public subnet 2 for ALB and ECS tasks (different AZ recommended)"
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: "Number of Fargate tasks to run"
+
+  OpenAISecretArn:
+    Type: String
+    Description: "ARN of Secrets Manager secret that stores OPENAI_API_KEY"
+
+  LangchainSecretArn:
+    Type: String
+    Description: "ARN of Secrets Manager secret that stores LANGCHAIN_API_KEY"
+
+Resources:
+
+  # ----------------------------
+  # CloudWatch Log Group
+  # ----------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/resume-builder
+      RetentionInDays: 30
+
+  # ----------------------------
+  # ECS Cluster
+  # ----------------------------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: resume-builder-cluster
+
+  # ----------------------------
+  # Task Execution Role (ECR + Logs + Secrets injection)
+  # ----------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecsExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ECR + Logs
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              # Allow ExecutionRole to fetch your two secrets
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref OpenAISecretArn
+                  - !Ref LangchainSecretArn
+
+  # ----------------------------
+  # Task Role (for app if it calls AWS directly)
+  # ----------------------------
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecsTaskSecretsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref OpenAISecretArn
+                  - !Ref LangchainSecretArn
+
+  # ----------------------------
+  # Security Groups
+  # ----------------------------
+
+  # ALB Security Group - open HTTP from internet
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB (HTTP from internet)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ECS Tasks Security Group - allow traffic only from ALB on port 8000
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS Fargate tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ----------------------------
+  # Task Definition
+  # ----------------------------
+  TaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: resume-builder-task
+      Cpu: "512"
+      Memory: "1024"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: resume-backend-container
+          Image: !Ref ECRImageUrl
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/resume-builder
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+          Environment:
+            - Name: LANGCHAIN_TRACING_V2
+              Value: "true"
+            - Name: LANGCHAIN_PROJECT
+              Value: "resume-builder"
+            - Name: LANGCHAIN_ENDPOINT
+              Value: "https://api.smith.langchain.com"
+          Secrets:
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Ref OpenAISecretArn
+            - Name: LANGCHAIN_API_KEY
+              ValueFrom: !Ref LangchainSecretArn
+
+  # ----------------------------
+  # Application Load Balancer
+  # ----------------------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: resume-backend-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  # ----------------------------
+  # Target Group (ALB -> ECS Tasks)
+  # ----------------------------
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: resume-backend-tg
+      Protocol: HTTP
+      Port: 8000
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: /docs
+      HealthCheckPort: "8000"
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  # ----------------------------
+  # ALB Listener (HTTP :80)
+  # ----------------------------
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ----------------------------
+  # ECS Service
+  # ----------------------------
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: resume-builder-service
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDef
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
+          SecurityGroups:
+            - !Ref ECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: resume-backend-container
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  LoadBalancerDNS:
+    Description: "Public URL of the resume builder backend"
+    Value: !GetAtt LoadBalancer.DNSName
+
+
