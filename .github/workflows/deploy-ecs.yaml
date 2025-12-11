@@ -1,0 +1,70 @@
+name: CI/CD – Resume Builder ECS
+
+on:
+  push:
+    branches:
+      - main   # run when you push to main
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Configure AWS credentials (from GitHub secrets)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 3. Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 4. Build and push Docker image
+      - name: Build, tag, and push image to ECR
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Full image name, with git SHA and latest tags
+          IMAGE_URI=${ECR_REGISTRY}/${ECR_REPOSITORY}
+
+          echo "Building image ${IMAGE_URI}:${IMAGE_TAG}"
+          docker build -t ${IMAGE_URI}:${IMAGE_TAG} -t ${IMAGE_URI}:latest .
+
+          echo "Pushing image tags to ECR"
+          docker push ${IMAGE_URI}:${IMAGE_TAG}
+          docker push ${IMAGE_URI}:latest
+
+          echo "Image pushed: ${IMAGE_URI}:${IMAGE_TAG}"
+
+      # 5. Force new deployment on ECS so it pulls the new :latest image
+      - name: Deploy new task to ECS
+        run: |
+          echo "Forcing new deployment on ECS service ${ECS_SERVICE} in cluster ${ECS_CLUSTER}"
+          aws ecs update-service \
+            --cluster ${ECS_CLUSTER} \
+            --service ${ECS_SERVICE} \
+            --force-new-deployment \
+            --region ${AWS_REGION}
+
+          echo "Waiting for service to become stable..."
+          aws ecs wait services-stable \
+            --cluster ${ECS_CLUSTER} \
+            --services ${ECS_SERVICE} \
+            --region ${AWS_REGION}
+
+          echo "Deployment finished ✅"
