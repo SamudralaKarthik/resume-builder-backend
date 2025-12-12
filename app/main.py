@@ -24,7 +24,7 @@ app.add_middleware(
 graph = build_resume_graph()
 
 
-@app.post("/tailor", response_model=TailorResponse)
+@app.post("/Generator", response_model=TailorResponse)
 async def tailor_resume(req: TailorRequest) -> TailorResponse:
     # Step 1 – Parse LaTeX
     print("1:",req)
