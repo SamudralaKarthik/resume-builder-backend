@@ -9,6 +9,7 @@ from app.services.latex_merge import merge_sections_into_latex
 from app.graph.graph_builder import build_resume_graph
 from app.graph.state import ResumeState
 
+app = FastAPI(title="AI Resume Tailor (LangGraph Backend Code)")
 
 # CORS – allow frontend access
 app.add_middleware(
