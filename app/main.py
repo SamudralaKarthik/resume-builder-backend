@@ -9,7 +9,6 @@ from app.services.latex_merge import merge_sections_into_latex
 from app.graph.graph_builder import build_resume_graph
 from app.graph.state import ResumeState
 
-app = FastAPI(title="AI Resume Tailor GITHUB TESTING (LangGraph Backend)")
 
 # CORS – allow frontend access
 app.add_middleware(
@@ -24,7 +23,7 @@ app.add_middleware(
 graph = build_resume_graph()
 
 
-@app.post("/tailor", response_model=TailorResponse)
+@app.post("/Generator", response_model=TailorResponse)
 async def tailor_resume(req: TailorRequest) -> TailorResponse:
     # Step 1 – Parse LaTeX
     print("1:",req)
